@@ -10,7 +10,7 @@ import os
 import sys
 sys.path.append('./src')
 from classifier import classifier_xgb_dict, classifier_ground_truth, classifier_xgb, NaiveBayes
-from mask_generator import random_mask_generator, all_mask_generator
+from mask_generator import random_mask_generator, all_mask_generator, generate_all_masks
 
 
 
@@ -74,6 +74,27 @@ def load_data(dataset_name):
         X_valid = (X_valid - torch.mean(X_train, dim=0)) / torch.std(X_train, dim=0)
         X_train = (X_train - torch.mean(X_train, dim=0)) / torch.std(X_train, dim=0)
         initial_feature = 100
+        
+    elif dataset_name == "pedestrian":
+        train = np.loadtxt('/work/users/d/d/ddinh/aaco/input_data/MelbournePedestrian/MelbournePedestrian_TRAIN.txt')
+        X_train = train[:, 1:]
+        y_train = train[:, 0]
+        valid = np.loadtxt('/work/users/d/d/ddinh/aaco/input_data/MelbournePedestrian/MelbournePedestrian_TEST.txt')
+        X_valid = valid[:, 1:]
+        y_valid = valid[:, 0]
+
+        y_train = np.eye(11)[y_train.astype(int)]
+        y_valid = np.eye(11)[y_valid.astype(int)]
+        y_train = y_train[:, 1:]
+        y_valid = y_valid[:, 1:]
+        
+        # convert to tensor
+        X_train = torch.tensor(X_train, dtype=torch.float32)
+        y_train = torch.tensor(y_train, dtype=torch.float32)
+        X_valid = torch.tensor(X_valid, dtype=torch.float32)
+        y_valid = torch.tensor(y_valid, dtype=torch.float32)
+        
+        initial_feature = 0
 
     feature_count = X_train.shape[1]  # Total number of features in the dataset
     return X_train, y_train, X_valid, y_valid, initial_feature, feature_count
@@ -94,7 +115,10 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         xgb_model = XGBClassifier()
         xgb_model.load_model('models/xgb_classifier_MNIST_random_subsets_5.json')
         return classifier_xgb(xgb_model)
-
+    elif dataset_name == "pedestrian":
+        xgb_model = XGBClassifier()
+        xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/pedestrian.model')
+        return xgb_model
     else:
         raise ValueError("Unsupported dataset or model")
 
@@ -127,6 +151,8 @@ def load_mask_generator(dataset_name, input_dim):
     elif dataset_name == "grid" or dataset_name == "gas10":
         all_masks = generate_all_masks(input_dim)  # Generate all possible masks for grid and gas10
         return all_mask_generator(all_masks)
+    elif dataset_name == "pedestrian": 
+        return random_mask_generator(10000, input_dim, 1000)
     else:
         raise ValueError("Unsupported dataset for mask generation")
         
@@ -162,6 +188,14 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     ##############################################
     ##### AACO Rollout
     ##############################################
+    """
+    Dzung:
+    just loop through all the features, and add the feature if it improves the loss, otherwise continue to the next feature
+    this might only work for single modality
+    
+    TODO: add the option to continue or stop
+    maybe using the current loss to decide whether to continue or stop
+    """
     
     for i in range(num_instances):  # Loop through the specified number of instances
         print(f"Starting instance {i} at {datetime.datetime.now()}")
@@ -187,7 +221,17 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 # Generate random masks and get the next set of possible masks
                 new_masks = mask_generator(mask_curr)
                 mask = torch.maximum(new_masks, mask_curr.repeat(new_masks.shape[0], 1))
-                mask[0] = mask_curr  # Ensure the current mask is included
+                mask[0] = mask_curr # Ensure the current mask is included
+                
+                current_mask = mask[0, :j]
+                mask[:, :j] = current_mask
+                
+                # Dzung: current feature is enough for single modality, 
+                # for multimodality, we can loop through all modality or sample random modality
+                # mask = torch.zeros((2, feature_count))
+                # mask[1, j] = 1
+                # mask[1] += mask_curr  # Ensure the current mask is included
+                # mask[0] = mask_curr  # Ensure the current mask is included
                 
                 # Get only unique masks
                 mask = mask.unique(dim=0)
@@ -197,8 +241,9 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 x_rep = X_train[idx_nn].repeat(n_masks_updated, 1)
                 mask_rep = torch.repeat_interleave(mask, nearest_neighbors, 0)
                 idx_nn_rep = idx_nn.repeat(n_masks_updated)
-                y_pred = classifier(torch.cat([torch.mul(x_rep, mask_rep) - (1 - mask_rep) * hide_val, mask_rep], -1), idx_nn)
-                
+                # y_pred = classifier(torch.cat([torch.mul(x_rep, mask_rep) - (1 - mask_rep) * hide_val, mask_rep], -1), idx_nn)
+                y_pred = classifier.predict_proba(torch.cat([x_rep * mask_rep, mask_rep], -1))
+                y_pred = torch.tensor(y_pred)
                 # Compute loss
                 loss = loss_function(y_pred, y_train[idx_nn].repeat(n_masks_updated, 1).float()) + acquisition_cost * mask_rep.sum(dim=1)
                 loss = torch.stack([loss[i * nearest_neighbors:(i+1) * nearest_neighbors].mean() for i in range(n_masks_updated)])
@@ -220,20 +265,24 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     break
                 else:
                     # If new features are acquired, choose the feature with the lowest expected loss
-                    non_zero = mask_diff.nonzero()[:, 1]
+                    non_zero = mask_diff.nonzero()[:, 1] 
                     ordering_masks = mask_curr.repeat(len(non_zero), 1)
                     ordering_masks[range(len(non_zero)), non_zero] = 1
                     ordering_masks = ordering_masks.repeat_interleave(nearest_neighbors, 0)
                     
                     x_ordering = X_train[idx_nn].repeat(len(non_zero), 1)
                     idx_nn_ordering = idx_nn.repeat(len(non_zero))
-                    y_pred = classifier(torch.cat([torch.mul(x_ordering, ordering_masks) - (1 - ordering_masks) * hide_val, ordering_masks], -1), idx_nn)
+                    # y_pred = classifier(torch.cat([torch.mul(x_ordering, ordering_masks) - (1 - ordering_masks) * hide_val, ordering_masks], -1), idx_nn)
+                    y_pred = classifier.predict_proba(torch.cat([x_ordering * ordering_masks, ordering_masks], -1))
+                    y_pred = torch.tensor(y_pred)
                     
                     # Compute loss for feature acquisition
                     loss = loss_function(y_pred, y_train[idx_nn].repeat(len(non_zero), 1).float())
                     avg_loss = torch.stack([loss[i * nearest_neighbors:(i + 1) * nearest_neighbors].mean() for i in range(len(non_zero))])
                     
-                    action_idx = non_zero[avg_loss.argmin()]
+                    # action_idx = non_zero[avg_loss.argmin()]
+                    # take the first non-zero feature
+                    action_idx = non_zero[0]
                     X_rollout.append(X[[i]])
                     y_rollout.append(y[[i]])
                     mask_rollout.append(mask_curr.clone().detach())
@@ -255,7 +304,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_rollout.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_rollout_first_075_test.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
