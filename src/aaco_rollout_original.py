@@ -6,16 +6,13 @@ import datetime
 import yaml
 from itertools import chain, combinations
 from xgboost import XGBClassifier
-from sklearn.model_selection import train_test_split
-
 import os
 import sys
-
 sys.path.append('./src')
 from classifier import classifier_xgb_dict, classifier_ground_truth, classifier_xgb, NaiveBayes
 from mask_generator import random_mask_generator, all_mask_generator, generate_all_masks
 
-from load_dataset import load_adni_data
+
 
 # Load configuration from YAML file
 def load_config(config_file):
@@ -98,21 +95,7 @@ def load_data(dataset_name):
         y_valid = torch.tensor(y_valid, dtype=torch.float32)
         
         initial_feature = 0
-    elif dataset_name == "adni":
-        dataset = load_adni_data()
-        x = dataset.x
-        y = dataset.y
-        
-        x_all = []
-        for item in x:
-            x_all.append(item.flatten('F'))
-        x_all = np.array(x_all)
-        
-        X_train, X_valid, y_train, y_valid = train_test_split(x_all, y, test_size=0.2, random_state=42)
-        
-        initial_feature = 0
-        feature_count = X_train.shape[1]
-        
+
     feature_count = X_train.shape[1]  # Total number of features in the dataset
     return X_train, y_train, X_valid, y_valid, initial_feature, feature_count
 
@@ -138,7 +121,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         return xgb_model
     else:
         raise ValueError("Unsupported dataset or model")
-    # Dzung: todo
+
         
 
 def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_instance=True):
@@ -169,8 +152,6 @@ def load_mask_generator(dataset_name, input_dim):
         all_masks = generate_all_masks(input_dim)  # Generate all possible masks for grid and gas10
         return all_mask_generator(all_masks)
     elif dataset_name == "pedestrian": 
-        return random_mask_generator(10000, input_dim, 1000)
-    elif dataset_name == "adni": 
         return random_mask_generator(10000, input_dim, 1000)
     else:
         raise ValueError("Unsupported dataset for mask generation")
