@@ -223,6 +223,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 mask = torch.maximum(new_masks, mask_curr.repeat(new_masks.shape[0], 1))
                 mask[0] = mask_curr # Ensure the current mask is included
                 
+                
+                # DZUNG: TODO: here is wrong, shouldn't be j but the last feature action
                 current_mask = mask[0, :j]
                 mask[:, :j] = current_mask
                 
