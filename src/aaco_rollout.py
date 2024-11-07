@@ -13,7 +13,7 @@ import sys
 
 sys.path.append('./src')
 from classifier import classifier_xgb_dict, classifier_ground_truth, classifier_xgb, NaiveBayes
-from mask_generator import random_mask_generator, all_mask_generator, generate_all_masks
+from mask_generator import random_mask_generator, all_mask_generator, generate_all_masks, different_masking
 
 from load_dataset import load_adni_data
 
@@ -148,7 +148,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         return xgb_model
     elif dataset_name == "adni":
         xgb_model = XGBClassifier(n_estimators=256)
-        xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_part2.model')
+        xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
         return xgb_model
     else:
         raise ValueError("Unsupported dataset or model")
@@ -184,11 +184,28 @@ def load_mask_generator(dataset_name, input_dim):
     elif dataset_name == "pedestrian": 
         return random_mask_generator(10000, input_dim, 1000)
     elif dataset_name == "adni": 
-        return random_mask_generator(20000, input_dim, 1000)
+        return different_masking(2000, [12, 4])
     else:
         raise ValueError("Unsupported dataset for mask generation")
         
-        
+
+def compute_accumulated_loss(y_pred, y_true, loss_function):
+    accumulated_loss = torch.zeros(y_pred.size(0))
+    
+    for inst in range(y_pred.size(0)):  
+        instance_loss = 0.0
+        count = 0
+        for t in range(y_pred.size(1)):  
+            if not torch.all(y_true[inst, t] == 0):  
+                timestep_loss = loss_function(y_pred[inst, t], y_true[inst, t])
+                instance_loss += timestep_loss
+                count += 1
+                
+        instance_loss /= count    
+        accumulated_loss[inst] = instance_loss.item()
+    
+    return accumulated_loss
+
         
 def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator, initial_feature, config):
     # Load parameters from the config
@@ -231,13 +248,24 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     num_ts = y_train.shape[1]
     num_modality = int(feature_count / num_ts)
     for i in range(num_instances):  # Loop through the specified number of instances
-        print(f"Starting instance {i} at {datetime.datetime.now()}")
+        print(f"Instance {i}")
         
         # Initialize the current mask (start with no features)
         mask_curr = torch.zeros((1, feature_count))
+        smallests_val = 0
         
         # for j in range(feature_count + 1):
         for j in range(num_ts + 1):
+            if (smallests_val == num_ts - 1) or (j == num_ts + 1):
+                # No more features to acquire, add prediction action
+                action = torch.zeros(1, feature_count + 1)
+                action[0, feature_count] = 1  # Action to predict (last column indicates prediction)
+                action_rollout.append(action)
+                X_rollout.append(X[[i]])
+                y_rollout.append(y[[i]])
+                mask_rollout.append(mask_curr)
+                break
+            
             if j == 0:
                 # Select the initial feature deterministically
                 mask_rollout.append(mask_curr.clone().detach())
@@ -253,19 +281,21 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
             else:
                 # Get the nearest neighbors based on the observed feature mask
                 idx_nn = get_knn(X_train, X[[i]], mask_curr.T, nearest_neighbors, i, not_i).squeeze()
-                print(f"Neighbors gathered for instance {i} at {datetime.datetime.now()}")
+                # print(f"Neighbors gathered for instance {i} at {datetime.datetime.now()}")
                 
                 # Generate random masks and get the next set of possible masks
                 new_masks = mask_generator(mask_curr)
                 mask = torch.maximum(new_masks, mask_curr.repeat(new_masks.shape[0], 1))
                 mask[0] = mask_curr # Ensure the current mask is included
                 
-                for k in range(num_modality):
-                    current_mask = mask_curr[:,(k * num_ts): (k + 1) * num_ts]
-                    last_feature = current_mask.nonzero()[-1][-1]
-                    # print("last_feature:", last_feature)
-                    # print(current_mask.nonzero())
-                    mask[:, (k * num_ts): (k * num_ts) + last_feature + 1] = current_mask[:,:last_feature + 1]
+                # replace the generated mask with the current mask 
+                if smallests_val:
+                    for k in range(num_modality):  
+                        current_mask = np.copy(mask_curr[:,(k * num_ts): (k + 1) * num_ts])
+                        # print("last_feature:", last_feature)
+                        # print(current_mask.nonzero())
+                        current_mask = torch.Tensor(current_mask)
+                        mask[:, (k * num_ts): (k * num_ts) + int(smallests_val) + 1] = current_mask[:,:int(smallests_val) + 1]
                 
                 # Dzung: current feature is enough for single modality, 
                 # for multimodality, we can loop through all modality or sample random modality
@@ -283,50 +313,74 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 mask_zero = x_rep == 0
                 
                 mask_rep = torch.repeat_interleave(mask, nearest_neighbors, 0)
-                mask_rep[mask_zero] = 0 # Dzung: mask out the nan values from x_rep, nan values are 0
+                mask_rep[mask_zero] = 0 # Dzung: mask nan values from mask
                 
+                # we cannot select nan features in validation
+                # Dzung, consider this case again, this is data leakage
                 mask_val_zero = X[[i]] == 0
                 mask_rep[:,mask_val_zero[0]] = 0
                 
-                # get corresponding y / timestep
-                location = []
-                for k in range(mask_rep.shape[0]):
-                    b = mask_rep[i]
-                    temp = -1
-                    for m in range(4):
-                        part = b[num_ts*m:num_ts*(m+1)]
-                        max_index = np.where(part == 1)[0]
-                        if len(max_index) > 0:
-                            max_index = max_index[-1]
-                            if max_index > temp:
-                                temp = max_index
-                    location.append(temp)
+                # # get corresponding y / timestep
+                # location = []
+                # for k in range(mask_rep.shape[0]):
+                #     b = mask_rep[i]
+                #     temp = -1
+                #     for m in range(4):
+                #         part = b[num_ts*m:num_ts*(m+1)]
+                #         max_index = np.where(part == 1)[0]
+                #         if len(max_index) > 0:
+                #             max_index = max_index[-1]
+                #             if max_index > temp:
+                #                 temp = max_index
+                #     location.append(temp)
                     
-                location = np.array(location)
-                y_rep = y_train[idx_nn].repeat(n_masks_updated, 1,1).float()
+                # location = np.array(location)
                 
-                y_rep_true = []
-                for k in range(y_rep.shape[0]):
-                    y_location = y_rep[k, location[k]]
-                    mask_nan = np.isnan(y_location)
-                    y_location[mask_nan] = 0
-                    y_rep_true.append(y_location)
-                y_rep_true = np.array(y_rep_true)
+                y_rep = y_train[idx_nn].repeat(n_masks_updated, 1,1).float() # n, 12, 3
+                y_rep_nan = torch.isnan(y_rep)
+                y_rep[y_rep_nan] = 0
+                y_rep = y_rep.numpy()
                 
-                mask_zero = np.sum(y_rep_true, axis=1) != 0
-                y_rep_true = y_rep_true[mask_zero]                
-                x_rep = x_rep[mask_zero]
-                mask_rep = mask_rep[mask_zero]
+                # y_rep_true = []
+                # for k in range(y_rep.shape[0]):
+                #     y_location = y_rep[k, location[k]]
+                #     mask_nan = np.isnan(y_location)
+                #     y_location[mask_nan] = 0
+                #     y_rep_true.append(y_location)
+                # y_rep_true = np.array(y_rep_true)
+                mask_zero_y = np.sum(y_rep, axis=-1) == 0
+                for m in range(num_modality):
+                    mask_rep[:, m * num_ts: (m + 1) * num_ts][mask_zero_y] = 0
+                    x_rep[:, m * num_ts: (m + 1) * num_ts][mask_zero_y] = 0
+                # mask_rep[mask_zero_y] = 0
+                # x_rep[mask_zero_y] = 0
                 
                 idx_nn_rep = idx_nn.repeat(n_masks_updated)
                 
                 # y_pred = classifier(torch.cat([torch.mul(x_rep, mask_rep) - (1 - mask_rep) * hide_val, mask_rep], -1), idx_nn)
-                y_pred = classifier.predict_proba(torch.cat([x_rep * mask_rep, mask_rep], -1))
-                y_pred = torch.tensor(y_pred)
                 
-                # Compute loss
-                y_rep_true = torch.Tensor(y_rep_true)
-                loss = loss_function(y_pred, y_rep_true) + acquisition_cost * mask_rep.sum(dim=1)
+                y_pred = np.zeros(y_rep.shape)
+                for ts in range(num_ts):
+                    x_input = np.zeros(x_rep.shape)
+                    mask_input = np.zeros(mask_rep.shape)
+                    
+                    x_input[:,:ts+1] = np.copy(x_rep[:,:ts+1])
+                    mask_input[:,:ts+1] = np.copy(mask_rep[:,:ts+1])
+                    
+                    x_input = torch.Tensor(x_input)
+                    mask_input = torch.Tensor(mask_input)
+                    pred = classifier.predict_proba(torch.cat([x_input * mask_input, mask_input], -1))
+                    y_pred[:,ts,:] = pred
+                    
+                y_pred = torch.Tensor(y_pred)
+                y_rep = torch.Tensor(y_rep)
+                
+                cost = torch.zeros(mask_rep.shape[0])
+                for m in range(num_modality):
+                    modality_cost = 1 if m in [0, 1] else 0.5
+                    cost += mask_rep[:, m * num_ts: (m + 1) * num_ts].sum(dim=1) * acquisition_cost * modality_cost
+                # import pdb; pdb.set_trace()
+                loss = compute_accumulated_loss(y_pred, y_rep, loss_function) + cost 
                 loss = torch.stack([loss[i * nearest_neighbors:(i+1) * nearest_neighbors].mean() for i in range(n_masks_updated)])
                 
                 # Find the best mask (one with the lowest loss)
@@ -363,20 +417,22 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     
                     # action_idx = non_zero[avg_loss.argmin()]
                     # take the first non-zero feature
-                    
+
                     # Dzung: todo: double check this non_zero
                     smallests = []
                     for k in range(num_modality):
                         parts = mask_diff[:, k * num_ts: (k + 1) * num_ts]
                         if len(parts.nonzero()) > 0:
-                            smallests.append(parts.nonzero()[0][1])
+                            smallests.append(parts.nonzero()[0][1].item())
                         else:
-                            smallests.append(1000)
-                            
+                            smallests.append(np.inf)
+                    
+                    # import pdb; pdb.set_trace()
+                    # print(smallests)
                     smallests = np.array(smallests)                    
                     smallests_val = np.min(smallests)
-                    action_idx = np.where(smallests == smallests_val) * num_ts + smallests[smallests == smallests_val]
-                    
+                    action_idx = np.where(smallests == smallests_val)[0] * num_ts + smallests[smallests == smallests_val]
+                    print(smallests, action_idx)
                     # action_idx = np.argmin(smallests) * num_ts + smallests[np.argmin(smallests)]
                     # what if we have multiple actions? 
                     
@@ -389,6 +445,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     
                     # Update the current mask
                     mask_curr[:, action_idx] = 1
+                    
+
     
     # Save the results
     results_dir = './results/'
@@ -401,7 +459,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_rollout_first_075_part2.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_rollout_different_masking_applyin_mask_generator_more_features.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 

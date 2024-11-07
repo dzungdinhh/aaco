@@ -48,3 +48,25 @@ class random_mask_generator():
         ball = generate_ball(self.num_generated_masks, self.feature_dim, self.feature_dim)
         return torch.tensor(ball[:, np.random.permutation(self.num_generated_masks)[:self.num_generated_masks]], dtype=torch.float32).T
     
+class different_masking():
+    def __init__(self, num_generated_masks, dims):
+        self.num_generated_masks = num_generated_masks
+        self.dims = dims
+        
+    def __call__(self, temp, pm=0.2, pd_m=0.4):
+        n, T, M = self.num_generated_masks, self.dims[0], self.dims[1]
+        mask_m1 = np.random.binomial(1, pm, size=(n, T, M))
+        
+        t_max = np.random.randint(0, T, size=n)
+        mask_m2 = np.ones((n, T, M))
+        for i in range(n):
+            mask_m2[i, t_max[i]:] = 0
+        
+        modality_drop = np.random.binomial(1, pd_m, size=(n, M))
+        mask_m3 = np.ones((n, T, M))
+        for m in range(M):
+            mask_m3[:, :, m] *= modality_drop[:, m].reshape(-1, 1)
+
+        final_mask = mask_m1 * mask_m2 * mask_m3
+
+        return torch.Tensor(final_mask.reshape(n, -1))
