@@ -72,9 +72,9 @@ def get_one_hot(targets, nb_classes):
     res = np.eye(nb_classes)[np.array(targets).reshape(-1)]
     return res.reshape(list(targets.shape) + [nb_classes])
 
-def load_adni_data(obs_length=10, drop_rate=0.7):
+def load_adni_data(obs_length=10, drop_rate=0.7, file_path="/work/users/d/d/ddinh/cvar_sensing/experiments/exp-adni/data_with_orig.npz"):
     # load data
-    file = np.load("/work/users/d/d/ddinh/cvar_sensing/experiments/exp-adni/data_with_orig.npz")
+    file = np.load(file_path)
     t = file["t"].astype("float32")
     x = file["x"].astype("float32")
     mask = file["mask"].astype("float32")

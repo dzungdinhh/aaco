@@ -7,7 +7,11 @@ import yaml
 from itertools import chain, combinations
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
-
+import tensorflow as tf
+from tensorflow.keras import layers, models
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+import numpy as np
+from tensorflow.keras.metrics import AUC
 import os
 import sys
 
@@ -147,9 +151,11 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/pedestrian.model')
         return xgb_model
     elif dataset_name == "adni":
-        xgb_model = XGBClassifier(n_estimators=256)
-        xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
-        return xgb_model
+        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp.keras')
+
+        # xgb_model = XGBClassifier(n_estimators=256)
+        # xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
+        # return xgb_model
     else:
         raise ValueError("Unsupported dataset or model")
         
