@@ -154,11 +154,12 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/pedestrian.model')
         return xgb_model
     elif dataset_name == "adni":
-        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp.keras')
-
-        # xgb_model = XGBClassifier(n_estimators=256)
-        # xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
-        # return xgb_model
+        classifiers = []
+        for i in range(12): 
+            xgb_model = XGBClassifier(n_estimators=256)
+            xgb_model.load_model(f"/work/users/d/d/ddinh/aaco/models/xgb_{i}.json")
+            classifiers.append(xgb_model)
+        return classifiers
     else:
         raise ValueError("Unsupported dataset or model")
         
@@ -384,7 +385,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     x_input = torch.Tensor(x_input)
                     mask_input = torch.Tensor(mask_input)
                     ts_rep = np.repeat(ts, x_input.shape[0]).reshape(-1, 1)
-                    pred = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
+                    x_input_xgb = x_input * mask_input
+                    pred = classifier[ts].predict_proba(x_input_xgb)
                     y_pred[:,ts,:] = pred
                     
                 y_pred = torch.Tensor(y_pred)
@@ -478,7 +480,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_get_zero.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_xgb_ts.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
