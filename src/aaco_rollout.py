@@ -14,6 +14,7 @@ import numpy as np
 from tensorflow.keras.metrics import AUC
 import os
 import sys
+from cvar_sensing.encoders import prepare_input
 
 sys.path.append('./src')
 from classifier import classifier_xgb_dict, classifier_ground_truth, classifier_xgb, NaiveBayes
@@ -103,19 +104,22 @@ def load_data(dataset_name):
         
         initial_feature = 0
     elif dataset_name == "adni":
-        def load_data(file_path):
+        def load_data(file_path, interpolation=False):
             ds = load_adni_data(file_path=file_path)
             x = ds.x
             y = ds.y
-            mask_nan = np.isnan(x)
-            x[mask_nan] = 0
+            if interpolation:
+                x = prepare_input(torch.Tensor([range(0, x.shape[1])] * x.shape[0]), torch.Tensor(x))[1].numpy()
+            else:
+                mask_nan = np.isnan(x)
+                x[mask_nan] = 0
 
             mask_nan_y = np.isnan(y)
             y[mask_nan_y] = 0
             return np.transpose(x, (0,2,1)).reshape(x.shape[0], -1), y
         
-        X_train, y_train = load_data("/work/users/d/d/ddinh/aaco/input_data/train_data.npz")
-        X_train_val, y_train_val = load_data("/work/users/d/d/ddinh/aaco/input_data/val_data.npz")
+        X_train, y_train = load_data("/work/users/d/d/ddinh/aaco/input_data/train_data.npz", interpolation=True)
+        X_train_val, y_train_val = load_data("/work/users/d/d/ddinh/aaco/input_data/val_data.npz", interpolation=True)
         X_train = np.concatenate([X_train, X_train_val], axis=0)
         y_train = np.concatenate([y_train, y_train_val], axis=0)
         print("*** x train:", X_train.shape)
@@ -303,13 +307,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     current_mask = np.copy(mask_curr[:,(k * num_ts): (k + 1) * num_ts])
                     current_mask = torch.Tensor(current_mask)
                     mask[:, (k * num_ts): (k * num_ts) + int(smallests_val) + 1] = current_mask[:,:int(smallests_val) + 1]
-                
-                # Dzung: current feature is enough for single modality, 
-                # for multimodality, we can loop through all modality or sample random modality
-                # mask = torch.zeros((2, feature_count))
-                # mask[1, j] = 1
-                # mask[1] += mask_curr  # Ensure the current mask is included
-                # mask[0] = mask_curr  # Ensure the current mask is included
+
                 
                 # Get only unique masks
                 mask = mask.unique(dim=0)
@@ -322,45 +320,11 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 mask_rep = torch.repeat_interleave(mask, nearest_neighbors, 0)
                 mask_rep[mask_zero] = 0 # Dzung: mask nan values from mask
                 
-                # we cannot select nan features in validation
-                # Dzung, consider this case again, this is data leakage
-                # we need to solve this in the future, like look at the current ts to see if we can select the feature
-                # mask_val_zero = X[[i]] == 0
-                # mask_rep[:,mask_val_zero[0]] = 0
-                
-                # mask_val_y_zero = (np.sum(y[[i]].numpy(), axis=-1) == 0)[0]
-                # for k in range(num_modality):
-                #     mask_rep[:, k * num_ts: (k + 1) * num_ts][:,mask_val_y_zero] = 0
-                #     x_rep[:, k * num_ts: (k + 1) * num_ts][:,mask_val_y_zero] = 0
-                
-                # # get corresponding y / timestep
-                # location = []
-                # for k in range(mask_rep.shape[0]):
-                #     b = mask_rep[i]
-                #     temp = -1
-                #     for m in range(4):
-                #         part = b[num_ts*m:num_ts*(m+1)]
-                #         max_index = np.where(part == 1)[0]
-                #         if len(max_index) > 0:
-                #             max_index = max_index[-1]
-                #             if max_index > temp:
-                #                 temp = max_index
-                #     location.append(temp)
-                    
-                # location = np.array(location)
-                
                 y_rep = y_train[idx_nn].repeat(n_masks_updated, 1,1).float() # n, 12, 3
                 y_rep_nan = torch.isnan(y_rep)
                 y_rep[y_rep_nan] = 0
                 y_rep = y_rep.numpy()
                 
-                # y_rep_true = []
-                # for k in range(y_rep.shape[0]):
-                #     y_location = y_rep[k, location[k]]
-                #     mask_nan = np.isnan(y_location)
-                #     y_location[mask_nan] = 0
-                #     y_rep_true.append(y_location)
-                # y_rep_true = np.array(y_rep_true)
                 mask_zero_y = np.sum(y_rep, axis=-1) == 0
                 for m in range(num_modality):
                     mask_rep[:, m * num_ts: (m + 1) * num_ts][mask_zero_y] = 0
@@ -402,7 +366,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 loss_argmin = loss.argmin()
                 mask_i = mask[loss_argmin]
                 mask_diff = mask_i - mask_curr
-                # print(mask_diff)
+
                 # Check if no new features are acquired
                 if mask_diff.sum().item() == 0:
                     # No more features to acquire, add prediction action
@@ -414,26 +378,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     mask_rollout.append(mask_curr)
                     break
                 else:
-                    # If new features are acquired, choose the feature with the lowest expected loss
                     non_zero = mask_diff.nonzero()[:, 1] 
-                    # ordering_masks = mask_curr.repeat(len(non_zero), 1)
-                    # ordering_masks[range(len(non_zero)), non_zero] = 1
-                    # ordering_masks = ordering_masks.repeat_interleave(nearest_neighbors, 0)
-                    
-                    # x_ordering = X_train[idx_nn].repeat(len(non_zero), 1)
-                    # idx_nn_ordering = idx_nn.repeat(len(non_zero))
-                    # # y_pred = classifier(torch.cat([torch.mul(x_ordering, ordering_masks) - (1 - ordering_masks) * hide_val, ordering_masks], -1), idx_nn)
-                    # y_pred = classifier.predict_proba(torch.cat([x_ordering * ordering_masks, ordering_masks], -1))
-                    # y_pred = torch.tensor(y_pred)
-                    
-                    # # Compute loss for feature acquisition
-                    # loss = loss_function(y_pred, y_train[idx_nn].repeat(len(non_zero), 1).float())
-                    # avg_loss = torch.stack([loss[i * nearest_neighbors:(i + 1) * nearest_neighbors].mean() for i in range(len(non_zero))])
-                    
-                    # action_idx = non_zero[avg_loss.argmin()]
-                    # take the first non-zero feature
-
-                    # Dzung: todo: double check this non_zero
+    
                     smallests = []
                     for k in range(num_modality):
                         parts = mask_diff[:, k * num_ts: (k + 1) * num_ts]
@@ -452,8 +398,6 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     action_idx = action_idx[action_non_nan.numpy()]
                     
                     print(smallests, action_idx)
-                    # action_idx = np.argmin(smallests) * num_ts + smallests[np.argmin(smallests)]
-                    # what if we have multiple actions? 
                     
                     X_rollout.append(X[[i]])
                     y_rollout.append(y[[i]])
@@ -478,7 +422,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_get_zero.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_get_zero_interpolation_lessfeatures.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
