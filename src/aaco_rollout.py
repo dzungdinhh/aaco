@@ -104,22 +104,43 @@ def load_data(dataset_name):
         
         initial_feature = 0
     elif dataset_name == "adni":
-        def load_data(file_path, interpolation=False):
+        def forward_fill(x, y):
+            def forward_fill_single(data):
+                n, timesteps, modalities = data.shape
+                filled = data.copy()
+                for i in range(n):
+                    for m in range(modalities):
+                        modality_values = filled[i, :, m]
+                        if np.isnan(modality_values).all():
+                            filled[i, :, m] = 0
+                        else:
+                            for t in range(1, timesteps): 
+                                if np.isnan(modality_values[t]):
+                                    modality_values[t] = modality_values[t - 1]
+                            modality_values[np.isnan(modality_values)] = 0
+                return filled
+
+            x_filled = forward_fill_single(x)
+            y_filled = forward_fill_single(y)
+            
+            return x_filled, y_filled
+        
+        def load_data(file_path, imputation=False):
             ds = load_adni_data(file_path=file_path)
             x = ds.x
             y = ds.y
-            if interpolation:
-                x = prepare_input(torch.Tensor([range(0, x.shape[1])] * x.shape[0]), torch.Tensor(x))[1].numpy()
+            if imputation:
+                x, y = forward_fill(x, y)
             else:
                 mask_nan = np.isnan(x)
                 x[mask_nan] = 0
-
-            mask_nan_y = np.isnan(y)
-            y[mask_nan_y] = 0
+                mask_nan_y = np.isnan(y)
+                y[mask_nan_y] = 0
+                
             return np.transpose(x, (0,2,1)).reshape(x.shape[0], -1), y
         
-        X_train, y_train = load_data("/work/users/d/d/ddinh/aaco/input_data/train_data.npz", interpolation=True)
-        X_train_val, y_train_val = load_data("/work/users/d/d/ddinh/aaco/input_data/val_data.npz", interpolation=True)
+        X_train, y_train = load_data("/work/users/d/d/ddinh/aaco/input_data/train_data.npz", imputation=True)
+        X_train_val, y_train_val = load_data("/work/users/d/d/ddinh/aaco/input_data/val_data.npz", imputation=True)
         X_train = np.concatenate([X_train, X_train_val], axis=0)
         y_train = np.concatenate([y_train, y_train_val], axis=0)
         print("*** x train:", X_train.shape)
