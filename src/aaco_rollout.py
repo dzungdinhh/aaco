@@ -226,18 +226,24 @@ def load_mask_generator(dataset_name, input_dim):
 
 def compute_accumulated_loss(y_pred, y_true, loss_function):
     accumulated_loss = torch.zeros(y_pred.size(0))
-    
-    for inst in range(y_pred.size(0)):  
-        instance_loss = 0.0
-        count = 0
-        for t in range(y_pred.size(1)):  
-            if not torch.all(y_true[inst, t] == 0):  
-                timestep_loss = loss_function(y_pred[inst, t], y_true[inst, t])
-                instance_loss += timestep_loss
-                count += 1
+    # this is when y_true is nan 
+    # for inst in range(y_pred.size(0)):  
+    #     instance_loss = 0.0
+    #     count = 0
+    #     for t in range(y_pred.size(1)):  
+    #         if not torch.all(y_true[inst, t] == 0):  
+    #             timestep_loss = loss_function(y_pred[inst, t], y_true[inst, t])
+    #             instance_loss += timestep_loss
+    #             count += 1
                 
-        instance_loss /= count    
-        accumulated_loss[inst] = instance_loss.item()
+    #     instance_loss /= count    
+    #     accumulated_loss[inst] = instance_loss.item()
+    for ts in range(y_pred.size(1)):
+        if torch.all(y_true[:, ts] == 0):
+            continue
+        timestep_loss = loss_function(y_pred[:, ts], y_true[:, ts])
+        accumulated_loss += timestep_loss
+    accumulated_loss /= y_pred.size(1)
     
     return accumulated_loss
 
