@@ -179,7 +179,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/pedestrian.model')
         return xgb_model
     elif dataset_name == "adni":
-        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp.keras')
+        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp_imputation.keras')
 
         # xgb_model = XGBClassifier(n_estimators=256)
         # xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
@@ -329,6 +329,17 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 mask = torch.maximum(new_masks, mask_curr.repeat(new_masks.shape[0], 1))
                 mask[0] = mask_curr # Ensure the current mask is included
                 
+                # remove nan values in test x from mask
+                mask_val_zero = X[[i]] == 0
+                mask[:,mask_val_zero[0]] = 0
+                
+                # remove the nan values in y true
+                mask_y = np.sum(y[[i]].numpy(), axis=-1) == 0
+                mask_y = mask_y.reshape(1, -1).repeat(mask.shape[0], 0)
+                # print(mask_y.shape)
+                for m in range(num_modality):
+                    mask[:, m * num_ts: (m + 1) * num_ts][mask_y] = 0
+                    
                 # replace the generated mask with the current mask                 
                 for k in range(num_modality):  
                     current_mask = np.copy(mask_curr[:,(k * num_ts): (k + 1) * num_ts])
@@ -340,13 +351,23 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 mask = mask.unique(dim=0)
                 n_masks_updated = mask.shape[0]
                 
+                if n_masks_updated == 1:
+                    # no new features to acquire
+                    action = torch.zeros(1, feature_count + 1)
+                    action[0, feature_count] = 1  # Action to predict (last column indicates prediction)
+                    action_rollout.append(action)
+                    X_rollout.append(X[[i]])
+                    y_rollout.append(y[[i]])
+                    mask_rollout.append(mask_curr)
+                    break
+                
                 # Predictions based on the classifier
                 x_rep = X_train[idx_nn].repeat(n_masks_updated, 1)
                 mask_zero = x_rep == 0
                 
                 mask_rep = torch.repeat_interleave(mask, nearest_neighbors, 0)
                 mask_rep[mask_zero] = 0 # Dzung: mask nan values from mask
-                
+                                
                 y_rep = y_train[idx_nn].repeat(n_masks_updated, 1,1).float() # n, 12, 3
                 y_rep_nan = torch.isnan(y_rep)
                 y_rep[y_rep_nan] = 0
@@ -449,7 +470,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_get_zero_interpolation_lessfeatures.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}mlp_imputation_exclude_nan_mask_less_features.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 

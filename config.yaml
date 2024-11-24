@@ -8,7 +8,12 @@
 
 dataset: "adni"                # Options: cube, grid, gas10, MNIST
 nearest_neighbors: 10          # k value for nearest neighbors
+
 # acquisition_cost: 0.0025         # XGB
-acquisition_cost: 0.001         # MLP
+acquisition_cost: 0.01         # MLP adni
+# acquisition_cost: 0.01         # MLP sythetic
+
 train_or_validation: "valid"   # Options: train, valid
-num_instances: 200               # How many instances to perform the rollout on
+
+num_instances: 200               # adni
+# num_instances: 400               # synthetic
