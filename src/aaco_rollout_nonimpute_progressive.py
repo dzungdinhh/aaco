@@ -262,7 +262,11 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         
         # Initialize the current mask (start with no features)
         mask_curr = torch.zeros((1, feature_count))
-        smallests_val = 0
+        
+        #start
+        # smallests_val = 0
+        smallests_val = 4
+        initial_feature = 4
         
         # for j in range(feature_count + 1):
         for j in range(num_ts + 1):
@@ -279,11 +283,14 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
             if j == 0:
                 # Select the initial feature deterministically
                 mask_rollout.append(mask_curr.clone().detach())
-                for k in range(num_modality):
+                #start
+                for k in range(2,3):
+                # for k in range(1):
                     mask_curr[0, (initial_feature + k * num_ts)] = 1
                 
                 action = torch.zeros(1, feature_count + 1)
-                for k in range(num_modality):
+                for k in range(2,3):
+                # for k in range(1):
                     action[0, (initial_feature + k * num_ts)] = 1
                 X_rollout.append(X[[i]])
                 y_rollout.append(y[[initial_feature]])
@@ -309,7 +316,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 for m in range(num_modality):
                     mask[:, m * num_ts: (m + 1) * num_ts][mask_y] = 0
                 
-                # replace the generated mask with the current mask                 
+                # replace the generated mask with the current mask         
                 for k in range(num_modality):  
                     current_mask = np.copy(mask_curr[:,(k * num_ts): (k + 1) * num_ts])
                     current_mask = torch.Tensor(current_mask)
@@ -453,7 +460,9 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_progressively.pt"
+    #start
+    # file_name = f"{results_dir}dataset_{config['dataset']}_mlp_progressively.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_progressively_test_start.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
