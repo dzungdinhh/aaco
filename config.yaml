@@ -12,8 +12,9 @@ nearest_neighbors: 10          # k value for nearest neighbors
 # acquisition_cost: 0.0025         # XGB
 # acquisition_cost: 0.01         # MLP sythetic
 
+# acquisition_cost: 0.0070         # MLP adni uncertainty
 acquisition_cost: 0.01         # MLP adni
-acquisition_cost: 0.0060         # MLP progressive
+# acquisition_cost: 0.0060         # MLP progressive
 
 train_or_validation: "valid"   # Options: train, valid
 

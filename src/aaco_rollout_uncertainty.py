@@ -154,7 +154,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/pedestrian.model')
         return xgb_model
     elif dataset_name == "adni":
-        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp.keras')
+        return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp_uncertainty.keras')
 
         # xgb_model = XGBClassifier(n_estimators=256)
         # xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
@@ -175,6 +175,7 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     X_query_squared = X_query ** 2
     X_train_X_query = X_train * X_query
     dist_squared = torch.matmul(X_train_squared, masks) - 2.0 * torch.matmul(X_train_X_query, masks) + torch.matmul(X_query_squared, masks)
+    
     if exclude_instance:
         idx_topk = torch.topk(dist_squared, num_neighbors + 1, dim=0, largest=False)[1]
         return idx_topk[idx_topk != instance_idx][:num_neighbors]
@@ -198,6 +199,26 @@ def load_mask_generator(dataset_name, input_dim):
         raise ValueError("Unsupported dataset for mask generation")
         
 
+# def compute_accumulated_loss(y_pred, y_true, loss_function):
+#     accumulated_loss = torch.zeros(y_pred.size(0))
+    
+#     for inst in range(y_pred.size(0)):  
+#         instance_loss = 0.0
+#         count = 0
+#         for t in range(y_pred.size(1)):  
+#             if not torch.all(y_true[inst, t] == 0):  
+#                 # y_pred has shape (num_instances, num_timesteps, num_classes, num_samples)
+#                 # y_true has shape (num_instances, num_timesteps, num_classes)
+#                 y_true_input = y_true[inst, t].unsqueeze(-1).repeat(1, y_pred.size(-1))
+#                 timestep_loss = loss_function(np.transpose(y_pred[inst, t], (1,0)), np.transpose(y_true_input, (1,0)))
+#                 instance_loss += timestep_loss.mean()
+#                 count += 1
+                
+#         instance_loss /= count    
+#         accumulated_loss[inst] = instance_loss.item()
+    
+#     return accumulated_loss
+
 def compute_accumulated_loss(y_pred, y_true, loss_function):
     accumulated_loss = torch.zeros(y_pred.size(0))
     
@@ -215,6 +236,17 @@ def compute_accumulated_loss(y_pred, y_true, loss_function):
     
     return accumulated_loss
 
+def mc_dropout_predictions(model, inputs, num_samples=20):
+    f_model = tf.function(lambda x: model(x, training=True))  
+    preds = np.stack([f_model(inputs).numpy() for _ in range(num_samples)], axis=0)
+    preds = np.transpose(preds, (1, 2, 0))
+    return preds
+
+# Uncertainty estimation
+def compute_uncertainty(preds):
+    # preds has shape (num_instances, num_timesteps, num_classes, num_samples)
+    predictive_variance = np.var(preds, axis=-1).mean(axis=(1, 2))
+    return predictive_variance
         
 def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator, initial_feature, config):
     # Load parameters from the config
@@ -354,6 +386,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 
                 # y_pred = classifier(torch.cat([torch.mul(x_rep, mask_rep) - (1 - mask_rep) * hide_val, mask_rep], -1), idx_nn)
                 
+                num_samples = 20
+                y_pred_var = np.zeros((y_rep.shape[0], y_rep.shape[1], y_rep.shape[2], num_samples))
                 y_pred = np.zeros(y_rep.shape)
                 for ts in range(num_ts):
                     x_input = np.zeros(x_rep.shape)
@@ -366,18 +400,29 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     x_input = torch.Tensor(x_input)
                     mask_input = torch.Tensor(mask_input)
                     ts_rep = np.repeat(ts, x_input.shape[0]).reshape(-1, 1)
+                    
+                    pred_var = mc_dropout_predictions(classifier, np.concatenate([x_input * mask_input, ts_rep], axis=-1), num_samples=num_samples)
                     pred = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
+                    y_pred_var[:,ts,:,:] = pred_var
                     y_pred[:,ts,:] = pred
                     
-                y_pred = torch.Tensor(y_pred)
+                y_pred_var = torch.Tensor(y_pred_var)
                 y_rep = torch.Tensor(y_rep)
+                y_pred = torch.Tensor(y_pred)
                 
                 cost = torch.zeros(mask_rep.shape[0])
                 for m in range(num_modality):
                     modality_cost = 1 if m in [0, 1] else 0.5
-                    cost += mask_rep[:, m * num_ts: (m + 1) * num_ts].sum(dim=1) * acquisition_cost * modality_cost
+                    cost += mask_rep[:, m * num_ts: (m + 1) * num_ts].sum(dim=1) * modality_cost #* acquisition_cost
                 # import pdb; pdb.set_trace()
-                loss = compute_accumulated_loss(y_pred, y_rep, loss_function) + cost 
+                # uncertainty = compute_uncertainty(y_pred.numpy())
+                uncertainty = compute_uncertainty(y_pred_var.numpy())
+                uncertainty = 0.02 *(uncertainty - uncertainty.min()) / (uncertainty.max() - uncertainty.min())
+                cost = 0.06*(cost - cost.min()) / (cost.max() - cost.min())
+                loss = compute_accumulated_loss(y_pred, y_rep, loss_function) + cost + uncertainty
+                # import pdb; pdb.set_trace()
+                # print(uncertainty.mean(), cost.mean())
+                # print(loss[:2], cost[:2], uncertainty[:2])
                 loss = torch.stack([loss[i * nearest_neighbors:(i+1) * nearest_neighbors].mean() for i in range(n_masks_updated)])
                 
                 # Find the best mask (one with the lowest loss)
@@ -428,7 +473,18 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     
                     # Update the current mask
                     mask_curr[:, action_idx] = 1
-                    
+        results_dir = './results/'
+        os.makedirs(results_dir, exist_ok=True)
+        
+        data = {
+            'X': torch.cat(X_rollout), 
+            'mask': torch.cat(mask_rollout), 
+            'Action': torch.cat(action_rollout), 
+            'y': torch.cat(y_rollout)
+        }
+        
+        file_name = f"{results_dir}dataset_{config['dataset']}_mlp_uncertainty.pt"
+        torch.save(data, file_name)                
 
     
     # Save the results
@@ -442,7 +498,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_non_empty_future_mask.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_uncertainty.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 

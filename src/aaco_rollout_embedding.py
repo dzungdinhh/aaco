@@ -163,7 +163,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         raise ValueError("Unsupported dataset or model")
         
 
-def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_instance=True):
+def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_instance=True, classifier=None, num_ts=12, num_modality=4):
     """
     Args:
     X_train: N x d Train Instances
@@ -171,10 +171,42 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     masks: d x R binary masks to try
     num_neighbors: Number of neighbors (k)
     """
-    X_train_squared = X_train ** 2
-    X_query_squared = X_query ** 2
-    X_train_X_query = X_train * X_query
-    dist_squared = torch.matmul(X_train_squared, masks) - 2.0 * torch.matmul(X_train_X_query, masks) + torch.matmul(X_query_squared, masks)
+    embedding_model = lambda x: classifier.layers[1](classifier.layers[0](x))
+
+    embeddings_train = []
+    embeddings_query = []
+    X_train_masked = np.copy(X_train) * tf.transpose(masks, (1, 0))
+    X_query_masked = np.copy(X_query) * tf.transpose(masks, (1, 0))
+    
+    for ts in range(num_ts):
+        x_input_train = np.zeros(X_train_masked.shape)
+        x_input_query = np.zeros(X_query_masked.shape)
+        
+        for k in range(num_modality):
+            x_input_train[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_train_masked[:,k * num_ts: k * num_ts + ts + 1])
+            x_input_query[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_query_masked[:,k * num_ts: k * num_ts + ts + 1])
+
+        ts_rep = np.repeat(ts, x_input_train.shape[0]).reshape(-1, 1)
+        pred_train = embedding_model(np.concatenate([x_input_train, ts_rep], axis=-1))
+        pred_query = embedding_model(np.concatenate([x_input_query, [[ts]]], axis=-1))
+        
+        embeddings_train.append(pred_train)
+        embeddings_query.append(pred_query)
+        
+    embeddings_train = np.array(embeddings_train)
+    embeddings_train = np.mean(embeddings_train, axis=0)
+    embeddings_query = np.mean(embeddings_query, axis=0)
+
+    X_train_squared = embeddings_train ** 2
+    X_query_squared = embeddings_query ** 2
+    X_train_X_query = embeddings_train * embeddings_query
+    X_train_squared = np.sum(X_train_squared, axis=-1)
+    X_query_squared = np.sum(X_query_squared, axis=-1)
+    X_train_X_query = np.sum(X_train_X_query, axis=-1)
+    
+    dist_squared = X_train_squared - 2.0 * X_train_X_query + X_query_squared
+    dist_squared = torch.Tensor(dist_squared)
+    
     if exclude_instance:
         idx_topk = torch.topk(dist_squared, num_neighbors + 1, dim=0, largest=False)[1]
         return idx_topk[idx_topk != instance_idx][:num_neighbors]
@@ -256,6 +288,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     """
     num_ts = y_train.shape[1]
     num_modality = int(feature_count / num_ts)
+
     for i in range(num_instances):  # Loop through the specified number of instances
         print(f"Instance {i}")
         
@@ -289,7 +322,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 action_rollout.append(action)
             else:
                 # Get the nearest neighbors based on the observed feature mask
-                idx_nn = get_knn(X_train, X[[i]], mask_curr.T, nearest_neighbors, i, not_i).squeeze()
+                idx_nn = get_knn(X_train, X[[i]], mask_curr.T, nearest_neighbors, i, not_i, classifier).squeeze()
                 # print(f"Neighbors gathered for instance {i} at {datetime.datetime.now()}")
                 
                 # Generate random masks and get the next set of possible masks
@@ -442,7 +475,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_non_empty_future_mask.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_embedding.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
@@ -476,7 +509,6 @@ if __name__ == "__main__":
     print("Timestamp:", datetime.datetime.now())
     
     aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator, initial_feature, config)
-    
 
 
-    
+
