@@ -156,6 +156,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
     elif dataset_name == "adni":
         return tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/mlp.keras')
 
+
         # xgb_model = XGBClassifier(n_estimators=256)
         # xgb_model.load_model('/work/users/d/d/ddinh/aaco/models/adni_different_masking.model')
         # return xgb_model
@@ -163,7 +164,7 @@ def load_classifier(dataset_name, X_train, y_train, input_dim):
         raise ValueError("Unsupported dataset or model")
         
 
-def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_instance=True):
+def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_instance=True, classifier=None, num_ts=12, num_modality=4):
     """
     Args:
     X_train: N x d Train Instances
@@ -171,10 +172,44 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     masks: d x R binary masks to try
     num_neighbors: Number of neighbors (k)
     """
-    X_train_squared = X_train ** 2
-    X_query_squared = X_query ** 2
-    X_train_X_query = X_train * X_query
-    dist_squared = torch.matmul(X_train_squared, masks) - 2.0 * torch.matmul(X_train_X_query, masks) + torch.matmul(X_query_squared, masks)
+    # embedding_model = lambda x: classifier.layers[1](classifier.layers[0](x))
+
+    embeddings_train = []
+    embeddings_query = []
+    X_train_masked = np.copy(X_train) * tf.transpose(masks, (1, 0))
+    X_query_masked = np.copy(X_query) * tf.transpose(masks, (1, 0))
+    
+    for ts in range(num_ts):
+        x_input_train = np.zeros(X_train_masked.shape)
+        x_input_query = np.zeros(X_query_masked.shape)
+        
+        for k in range(num_modality):
+            x_input_train[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_train_masked[:,k * num_ts: k * num_ts + ts + 1])
+            x_input_query[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_query_masked[:,k * num_ts: k * num_ts + ts + 1])
+
+        ts_rep = np.repeat(ts, x_input_train.shape[0]).reshape(-1, 1)
+        # pred_train = embedding_model(np.concatenate([x_input_train, ts_rep], axis=-1))
+        # pred_query = embedding_model(np.concatenate([x_input_query, [[ts]]], axis=-1))
+        pred_train, _ = classifier.predict(np.concatenate([x_input_train, ts_rep], axis=-1), verbose=0)
+        pred_query, _ = classifier.predict(np.concatenate([x_input_query, [[ts]]], axis=-1), verbose=0)
+        
+        embeddings_train.append(pred_train)
+        embeddings_query.append(pred_query)
+        
+    embeddings_train = np.array(embeddings_train)
+    embeddings_train = np.mean(embeddings_train, axis=0)
+    embeddings_query = np.mean(embeddings_query, axis=0)
+
+    X_train_squared = embeddings_train ** 2
+    X_query_squared = embeddings_query ** 2
+    X_train_X_query = embeddings_train * embeddings_query
+    X_train_squared = np.sum(X_train_squared, axis=-1)
+    X_query_squared = np.sum(X_query_squared, axis=-1)
+    X_train_X_query = np.sum(X_train_X_query, axis=-1)
+    
+    dist_squared = X_train_squared - 2.0 * X_train_X_query + X_query_squared
+    dist_squared = torch.Tensor(dist_squared)
+    
     if exclude_instance:
         idx_topk = torch.topk(dist_squared, num_neighbors + 1, dim=0, largest=False)[1]
         return idx_topk[idx_topk != instance_idx][:num_neighbors]
@@ -256,6 +291,48 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     """
     num_ts = y_train.shape[1]
     num_modality = int(feature_count / num_ts)
+
+    class EmbeddingModels(tf.keras.Model):
+        def __init__(self, num_features):
+            super().__init__()
+            self.num_features = num_features
+            self.base_model = tf.keras.Sequential([
+                tf.keras.layers.InputLayer(input_shape=(num_features,)),
+                tf.keras.layers.Dense(15, activation='relu'),
+                tf.keras.layers.Dense(15, activation='relu'),
+                tf.keras.layers.Dense(15, activation='relu'),
+            ])
+            self.embedding = tf.keras.layers.Dense(self.num_features, activation='sigmoid')
+            self.prediction = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
+
+        def call(self, x):
+            x = self.base_model(x)
+            embedding_space = self.embedding(x)
+            prediction = self.prediction(x)
+            return embedding_space, prediction
+        
+        def get_config(self):
+            config = super().get_config()
+            config.update({
+                'num_features': self.num_features,
+            })
+            return config
+
+        @classmethod
+        def from_config(cls, config):
+            return cls(**config)
+    num_features = 49  # Replace with your actual number of features
+    embedding_model = EmbeddingModels(num_features=num_features)
+
+    # Build the model by calling it on some input (required before loading weights)
+    dummy_input = tf.zeros((1, num_features))
+    embedding_model(dummy_input)
+
+    # Load the weights
+    embedding_model.load_weights('/work/users/d/d/ddinh/aaco/models/embedding_gt.weights.h5')
+
+    # embedding_model = tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/embedding_gt.h5', custom_objects={'EmbeddingModels': EmbeddingModels})
+    
     for i in range(num_instances):  # Loop through the specified number of instances
         print(f"Instance {i}")
         
@@ -289,7 +366,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                 action_rollout.append(action)
             else:
                 # Get the nearest neighbors based on the observed feature mask
-                idx_nn = get_knn(X_train, X[[i]], mask_curr.T, nearest_neighbors, i, not_i).squeeze()
+                idx_nn = get_knn(X_train, X[[i]], mask_curr.T, nearest_neighbors, i, not_i, embedding_model).squeeze()
                 # print(f"Neighbors gathered for instance {i} at {datetime.datetime.now()}")
                 
                 # Generate random masks and get the next set of possible masks
@@ -366,7 +443,9 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     x_input = torch.Tensor(x_input)
                     mask_input = torch.Tensor(mask_input)
                     ts_rep = np.repeat(ts, x_input.shape[0]).reshape(-1, 1)
-                    pred = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
+                    embeddings, class_logits = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
+                    pred = np.argmax(class_logits, axis=-1)
+                    pred = np.eye(3)[pred] # convert to one hot
                     y_pred[:,ts,:] = pred
                     
                 y_pred = torch.Tensor(y_pred)
@@ -430,7 +509,18 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     mask_curr[:, action_idx] = 1
                     
 
-    
+        results_dir = './results/'
+        os.makedirs(results_dir, exist_ok=True)
+        
+        data = {
+            'X': torch.cat(X_rollout), 
+            'mask': torch.cat(mask_rollout), 
+            'Action': torch.cat(action_rollout), 
+            'y': torch.cat(y_rollout)
+        }
+        
+        file_name = f"{results_dir}dataset_{config['dataset']}_mlp_embedding_gt_{config['acquisition_cost']}.pt"
+        torch.save(data, file_name)
     # Save the results
     results_dir = './results/'
     os.makedirs(results_dir, exist_ok=True)
@@ -441,8 +531,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'Action': torch.cat(action_rollout), 
         'y': torch.cat(y_rollout)
     }
-
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_non_empty_future_mask_{config['acquisition_cost']}.pt"
+    
+    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_embedding_gt_{config['acquisition_cost']}.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 
@@ -476,7 +566,6 @@ if __name__ == "__main__":
     print("Timestamp:", datetime.datetime.now())
     
     aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator, initial_feature, config)
-    
 
 
-    
+
