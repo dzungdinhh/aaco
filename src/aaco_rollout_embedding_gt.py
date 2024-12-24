@@ -179,26 +179,29 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     X_train_masked = np.copy(X_train) * tf.transpose(masks, (1, 0))
     X_query_masked = np.copy(X_query) * tf.transpose(masks, (1, 0))
     
-    for ts in range(num_ts):
-        x_input_train = np.zeros(X_train_masked.shape)
-        x_input_query = np.zeros(X_query_masked.shape)
+    # for ts in range(num_ts):
+    #     x_input_train = np.zeros(X_train_masked.shape)
+    #     x_input_query = np.zeros(X_query_masked.shape)
         
-        for k in range(num_modality):
-            x_input_train[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_train_masked[:,k * num_ts: k * num_ts + ts + 1])
-            x_input_query[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_query_masked[:,k * num_ts: k * num_ts + ts + 1])
+    #     for k in range(num_modality):
+    #         x_input_train[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_train_masked[:,k * num_ts: k * num_ts + ts + 1])
+    #         x_input_query[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_query_masked[:,k * num_ts: k * num_ts + ts + 1])
 
-        ts_rep = np.repeat(ts, x_input_train.shape[0]).reshape(-1, 1)
-        # pred_train = embedding_model(np.concatenate([x_input_train, ts_rep], axis=-1))
-        # pred_query = embedding_model(np.concatenate([x_input_query, [[ts]]], axis=-1))
-        pred_train, _ = classifier.predict(np.concatenate([x_input_train, ts_rep], axis=-1), verbose=0)
-        pred_query, _ = classifier.predict(np.concatenate([x_input_query, [[ts]]], axis=-1), verbose=0)
+    #     ts_rep = np.repeat(ts, x_input_train.shape[0]).reshape(-1, 1)
+    #     # pred_train = embedding_model(np.concatenate([x_input_train, ts_rep], axis=-1))
+    #     # pred_query = embedding_model(np.concatenate([x_input_query, [[ts]]], axis=-1))
+    #     pred_train, _ = classifier.predict(np.concatenate([x_input_train, ts_rep], axis=-1), verbose=0)
+    #     pred_query, _ = classifier.predict(np.concatenate([x_input_query, [[ts]]], axis=-1), verbose=0)
         
-        embeddings_train.append(pred_train)
-        embeddings_query.append(pred_query)
-        
-    embeddings_train = np.array(embeddings_train)
-    embeddings_train = np.mean(embeddings_train, axis=0)
-    embeddings_query = np.mean(embeddings_query, axis=0)
+    #     embeddings_train.append(pred_train)
+    #     embeddings_query.append(pred_query)
+    # print("X_train_masked", X_train_masked.shape)
+    embeddings_train, _ = classifier.predict(X_train_masked, verbose=0)
+    embeddings_query, _ = classifier.predict(X_query_masked, verbose=0)
+    
+    # embeddings_train = np.array(embeddings_train)
+    # embeddings_train = np.mean(embeddings_train, axis=0)
+    # embeddings_query = np.mean(embeddings_query, axis=0)
 
     X_train_squared = embeddings_train ** 2
     X_query_squared = embeddings_query ** 2
@@ -208,6 +211,7 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     X_train_X_query = np.sum(X_train_X_query, axis=-1)
     
     dist_squared = X_train_squared - 2.0 * X_train_X_query + X_query_squared
+    # print(dist_squared.shape)
     dist_squared = torch.Tensor(dist_squared)
     
     if exclude_instance:
@@ -293,22 +297,22 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     num_modality = int(feature_count / num_ts)
 
     class EmbeddingModels(tf.keras.Model):
-        def __init__(self, num_features):
+        def __init__(self):
             super().__init__()
-            self.num_features = num_features
+            self.num_features = 12 * 4
             self.base_model = tf.keras.Sequential([
-                tf.keras.layers.InputLayer(input_shape=(num_features,)),
+                tf.keras.layers.InputLayer(input_shape=(self.num_features,)),
                 tf.keras.layers.Dense(15, activation='relu'),
                 tf.keras.layers.Dense(15, activation='relu'),
                 tf.keras.layers.Dense(15, activation='relu'),
             ])
-            self.embedding = tf.keras.layers.Dense(self.num_features, activation='sigmoid')
-            self.prediction = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
+            self.embedding_head = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
+            self.prediction_head = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
 
         def call(self, x):
             x = self.base_model(x)
-            embedding_space = self.embedding(x)
-            prediction = self.prediction(x)
+            embedding_space = self.embedding_head(x)
+            prediction = self.prediction_head(x)
             return embedding_space, prediction
         
         def get_config(self):
@@ -321,8 +325,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         @classmethod
         def from_config(cls, config):
             return cls(**config)
-    num_features = 49  # Replace with your actual number of features
-    embedding_model = EmbeddingModels(num_features=num_features)
+    num_features = 48  # Replace with your actual number of features
+    embedding_model = EmbeddingModels()
 
     # Build the model by calling it on some input (required before loading weights)
     dummy_input = tf.zeros((1, num_features))
@@ -443,9 +447,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
                     x_input = torch.Tensor(x_input)
                     mask_input = torch.Tensor(mask_input)
                     ts_rep = np.repeat(ts, x_input.shape[0]).reshape(-1, 1)
-                    embeddings, class_logits = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
-                    pred = np.argmax(class_logits, axis=-1)
-                    pred = np.eye(3)[pred] # convert to one hot
+                    pred = classifier.predict(np.concatenate([x_input * mask_input, ts_rep], axis=-1), verbose=0)
                     y_pred[:,ts,:] = pred
                     
                 y_pred = torch.Tensor(y_pred)
