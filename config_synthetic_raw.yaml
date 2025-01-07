@@ -9,7 +9,7 @@
 dataset: "synthetic_raw"                # Options: cube, grid, gas10, MNIST
 nearest_neighbors: 5          # k value for nearest neighbors
 
-acquisition_cost: 0.015         # MLP adni
+acquisition_cost: 0.02         # MLP adni
 
 train_or_validation: "valid"   # Options: train, valid
 

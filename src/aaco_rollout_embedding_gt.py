@@ -18,6 +18,7 @@ import sys
 sys.path.append('./src')
 from classifier import classifier_xgb_dict, classifier_ground_truth, classifier_xgb, NaiveBayes
 from mask_generator import random_mask_generator, all_mask_generator, generate_all_masks, different_masking
+from keras.models import load_model
 
 from load_dataset import load_adni_data
 
@@ -178,26 +179,10 @@ def get_knn(X_train, X_query, masks, num_neighbors, instance_idx=0, exclude_inst
     embeddings_query = []
     X_train_masked = np.copy(X_train) * tf.transpose(masks, (1, 0))
     X_query_masked = np.copy(X_query) * tf.transpose(masks, (1, 0))
+    # repeat the query instance to match the size of the train instances
+    X_query_masked = np.repeat(X_query_masked, X_train_masked.shape[0], axis=0)
     
-    # for ts in range(num_ts):
-    #     x_input_train = np.zeros(X_train_masked.shape)
-    #     x_input_query = np.zeros(X_query_masked.shape)
-        
-    #     for k in range(num_modality):
-    #         x_input_train[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_train_masked[:,k * num_ts: k * num_ts + ts + 1])
-    #         x_input_query[:,k * num_ts: k * num_ts + ts + 1] = np.copy(X_query_masked[:,k * num_ts: k * num_ts + ts + 1])
-
-    #     ts_rep = np.repeat(ts, x_input_train.shape[0]).reshape(-1, 1)
-    #     # pred_train = embedding_model(np.concatenate([x_input_train, ts_rep], axis=-1))
-    #     # pred_query = embedding_model(np.concatenate([x_input_query, [[ts]]], axis=-1))
-    #     pred_train, _ = classifier.predict(np.concatenate([x_input_train, ts_rep], axis=-1), verbose=0)
-    #     pred_query, _ = classifier.predict(np.concatenate([x_input_query, [[ts]]], axis=-1), verbose=0)
-        
-    #     embeddings_train.append(pred_train)
-    #     embeddings_query.append(pred_query)
-    # print("X_train_masked", X_train_masked.shape)
-    embeddings_train, _ = classifier.predict(X_train_masked, verbose=0)
-    embeddings_query, _ = classifier.predict(X_query_masked, verbose=0)
+    embeddings_query, embeddings_train = classifier.predict([X_query_masked, X_train_masked], verbose=0)
     
     # embeddings_train = np.array(embeddings_train)
     # embeddings_train = np.mean(embeddings_train, axis=0)
@@ -296,46 +281,8 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
     num_ts = y_train.shape[1]
     num_modality = int(feature_count / num_ts)
 
-    class EmbeddingModels(tf.keras.Model):
-        def __init__(self):
-            super().__init__()
-            self.num_features = 12 * 4
-            self.base_model = tf.keras.Sequential([
-                tf.keras.layers.InputLayer(input_shape=(self.num_features,)),
-                tf.keras.layers.Dense(15, activation='relu'),
-                tf.keras.layers.Dense(15, activation='relu'),
-                tf.keras.layers.Dense(15, activation='relu'),
-            ])
-            self.embedding_head = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
-            self.prediction_head = tf.keras.layers.Dense(self.num_features + 1, activation='softmax')
-
-        def call(self, x):
-            x = self.base_model(x)
-            embedding_space = self.embedding_head(x)
-            prediction = self.prediction_head(x)
-            return embedding_space, prediction
-        
-        def get_config(self):
-            config = super().get_config()
-            config.update({
-                'num_features': self.num_features,
-            })
-            return config
-
-        @classmethod
-        def from_config(cls, config):
-            return cls(**config)
-    num_features = 48  # Replace with your actual number of features
-    embedding_model = EmbeddingModels()
-
-    # Build the model by calling it on some input (required before loading weights)
-    dummy_input = tf.zeros((1, num_features))
-    embedding_model(dummy_input)
-
-    # Load the weights
-    embedding_model.load_weights('/work/users/d/d/ddinh/aaco/models/embedding_gt.weights.h5')
-
-    # embedding_model = tf.keras.models.load_model('/work/users/d/d/ddinh/aaco/models/embedding_gt.h5', custom_objects={'EmbeddingModels': EmbeddingModels})
+    
+    embedding_model = load_model('/work/users/d/d/ddinh/aaco/models/siamese_adni.h5')
     
     for i in range(num_instances):  # Loop through the specified number of instances
         print(f"Instance {i}")
@@ -521,7 +468,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
             'y': torch.cat(y_rollout)
         }
         
-        file_name = f"{results_dir}dataset_{config['dataset']}_mlp_embedding_gt_{config['acquisition_cost']}.pt"
+        file_name = f"{results_dir}dataset_{config['dataset']}_siamese_{config['acquisition_cost']}.pt"
         torch.save(data, file_name)
     # Save the results
     results_dir = './results/'
@@ -534,7 +481,7 @@ def aaco_rollout(X_train, y_train, X_valid, y_valid, classifier, mask_generator,
         'y': torch.cat(y_rollout)
     }
     
-    file_name = f"{results_dir}dataset_{config['dataset']}_mlp_embedding_gt_{config['acquisition_cost']}.pt"
+    file_name = f"{results_dir}dataset_{config['dataset']}_siamese_{config['acquisition_cost']}.pt"
     torch.save(data, file_name)
     print(f"Results saved to {file_name}")
 

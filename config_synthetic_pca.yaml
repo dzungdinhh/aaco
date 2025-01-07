@@ -1,0 +1,17 @@
+# config.yaml
+
+# dataset: "cube"                # Options: cube, grid, gas10, MNIST
+# nearest_neighbors: 20          # k value for nearest neighbors
+# acquisition_cost: 0.05         # Cost for each feature acquisition
+# train_or_validation: "train"   # Options: train, valid
+# num_instances: 2               # How many instances to perform the rollout on
+
+dataset: "synthetic_pca"                # Options: cube, grid, gas10, MNIST
+nearest_neighbors: 10          # k value for nearest neighbors
+
+acquisition_cost: 0.035         # MLP adni
+
+train_or_validation: "valid"   # Options: train, valid
+
+# num_instances: 50             
+num_instances: 10000             
