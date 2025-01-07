@@ -3,4 +3,8 @@ input_data/Synthetic_images/train_counter_images.npy
 input_data/Synthetic_images/train_digits_images.npy
 input_data/Synthetic_images/test_counter_images.npy
 input_data/Synthetic_images/
+results/dataset_synthetic_pca_xgb_0.03.pt
+results/dataset_synthetic_pca_xgb_0.025.pt
+results/dataset_synthetic_pca_xgb_0.035.pt
+
 
